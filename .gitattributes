@@ -1,0 +1,49 @@
+# .gitattributes
+# ─────────────────────────────────────────────────────────────────
+# Declare line-ending behaviour explicitly for every file type.
+# This overrides each contributor's local core.autocrlf setting,
+# making the repository portable across Windows, macOS, and Linux.
+#
+# Rule of thumb:
+#   text=auto eol=lf  →  store as LF in repo; Git converts on checkout
+#   binary            →  never touch bytes (fonts, images, etc.)
+# ─────────────────────────────────────────────────────────────────
+
+# ── Default: normalise all detected text files to LF in the repo ──
+* text=auto eol=lf
+
+# ── Python source ─────────────────────────────────────────────────
+*.py     text eol=lf
+
+# ── Data / config files ───────────────────────────────────────────
+*.json   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+*.txt    text eol=lf
+*.md     text eol=lf
+*.rst    text eol=lf
+
+# ── Shell scripts (must be LF or they break on Linux) ─────────────
+*.sh     text eol=lf
+
+# ── Web assets ────────────────────────────────────────────────────
+*.html   text eol=lf
+*.css    text eol=lf
+*.js     text eol=lf
+
+# ── Binary files — never modify bytes ─────────────────────────────
+*.ttf    binary
+*.otf    binary
+*.woff   binary
+*.woff2  binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.zip    binary
+*.gz     binary
