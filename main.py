@@ -37,9 +37,19 @@ log = logging.getLogger(__name__)
 # Configuration
 # ─────────────────────────────────────────────
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL        = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# Model fallback chain — each model has its own independent daily quota.
+# If one model's quota is exhausted, we automatically try the next one.
+# Override with GEMINI_MODEL env var to force a single model.
+_FALLBACK_MODELS = [
+    "gemini-2.0-flash-lite",   # Fastest, lightest, separate quota
+    "gemini-2.0-flash",        # Primary model
+    "gemini-1.5-flash-latest", # Legacy fallback
+]
+_env_model = os.getenv("GEMINI_MODEL", "")
+GEMINI_MODELS = [_env_model] if _env_model else _FALLBACK_MODELS
 
 TOPICS_FILE  = Path("topics.json")
 FONT_FILE    = Path("bold_font.ttf")
@@ -68,7 +78,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # Retry settings
 MAX_RETRIES  = 3
-RETRY_DELAY  = 5           # seconds
+RETRY_DELAY  = 10          # seconds between retries for the same model
 
 # ─────────────────────────────────────────────
 # Helper utilities
@@ -147,57 +157,82 @@ Return STRICTLY this JSON schema – nothing else:
 """
 
 
+def _is_quota_or_notfound(exc: Exception) -> bool:
+    """Return True if the exception is a quota/rate-limit or model-not-found error."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("429", "resourceexhausted", "quota", "404", "not found", "not_found"))
+
+
 def generate_slides(topic: str) -> list[dict]:
-    """Call Gemini and return the parsed 5-slide list."""
+    """
+    Call Gemini and return the parsed 5-slide list.
+
+    Uses a multi-model fallback chain: tries each model in GEMINI_MODELS
+    with MAX_RETRIES per model before moving to the next one.
+    """
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL,
-        system_instruction=GEMINI_SYSTEM,
-    )
-
     prompt = GEMINI_USER_TEMPLATE.format(topic=topic)
+    last_error: Exception | None = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for model_name in GEMINI_MODELS:
+        log.info("──── Trying model: %s ────", model_name)
+
         try:
-            log.info("Calling Gemini API (attempt %d/%d)…", attempt, MAX_RETRIES)
-            response = model.generate_content(prompt)
-            raw_text = response.text.strip()
-
-            # Strip accidental markdown fences
-            if raw_text.startswith("```"):
-                lines = raw_text.splitlines()
-                raw_text = "\n".join(
-                    ln for ln in lines
-                    if not ln.strip().startswith("```")
-                ).strip()
-
-            slides: list[dict] = json.loads(raw_text)
-
-            if not isinstance(slides, list) or len(slides) != SLIDE_COUNT:
-                raise ValueError(
-                    f"Expected {SLIDE_COUNT} slides, got {len(slides) if isinstance(slides, list) else type(slides)}"
-                )
-
-            # Validate required keys
-            for s in slides:
-                if "slide_number" not in s or "text" not in s or "bg_prompt" not in s:
-                    raise ValueError(f"Slide missing required keys: {s}")
-
-            log.info("Gemini returned %d valid slides.", len(slides))
-            return slides
-
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=GEMINI_SYSTEM,
+            )
         except Exception as exc:
-            log.warning("Gemini error (attempt %d): %s", attempt, exc)
-            if attempt < MAX_RETRIES:
-                # The Free Tier quota is strictly 15 Requests Per Minute.
-                # A 65-second sleep guarantees the 1-minute window completely resets
-                # and safely bypasses the 'retry_delay: 46s' quota errors.
-                sleep_time = 65
-                log.info("Quota limit reached. Sleeping for %d seconds to clear 1-minute window...", sleep_time)
-                time.sleep(sleep_time)
-            else:
-                log.error("All Gemini attempts exhausted. Aborting.")
-                raise
+            log.warning("Failed to initialise model '%s': %s", model_name, exc)
+            last_error = exc
+            continue
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                log.info("Calling Gemini [%s] (attempt %d/%d)…", model_name, attempt, MAX_RETRIES)
+                response = model.generate_content(prompt)
+                raw_text = response.text.strip()
+
+                # Strip accidental markdown fences
+                if raw_text.startswith("```"):
+                    lines = raw_text.splitlines()
+                    raw_text = "\n".join(
+                        ln for ln in lines
+                        if not ln.strip().startswith("```")
+                    ).strip()
+
+                slides: list[dict] = json.loads(raw_text)
+
+                if not isinstance(slides, list) or len(slides) != SLIDE_COUNT:
+                    raise ValueError(
+                        f"Expected {SLIDE_COUNT} slides, got {len(slides) if isinstance(slides, list) else type(slides)}"
+                    )
+
+                # Validate required keys
+                for s in slides:
+                    if "slide_number" not in s or "text" not in s or "bg_prompt" not in s:
+                        raise ValueError(f"Slide missing required keys: {s}")
+
+                log.info("✅ Gemini [%s] returned %d valid slides.", model_name, len(slides))
+                return slides
+
+            except Exception as exc:
+                last_error = exc
+                log.warning("Gemini [%s] error (attempt %d): %s", model_name, attempt, exc)
+
+                # If quota exhausted or model not found → skip to next model immediately
+                if _is_quota_or_notfound(exc):
+                    log.warning("Quota/model error on '%s' — skipping to next model.", model_name)
+                    break  # break inner retry loop, continue to next model
+
+                # For parse errors or transient issues, retry the same model
+                if attempt < MAX_RETRIES:
+                    log.info("Sleeping %d seconds before retry…", RETRY_DELAY)
+                    time.sleep(RETRY_DELAY)
+
+    # If we get here, all models and all retries failed
+    log.error("All models and retries exhausted. Tried: %s", GEMINI_MODELS)
+    raise RuntimeError(f"Gemini generation failed on all models. Last error: {last_error}")
 
 
 # ─────────────────────────────────────────────
