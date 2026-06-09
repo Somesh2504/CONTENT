@@ -23,6 +23,10 @@ jobs:
     name: Generate Carousel & Post to Telegram
     runs-on: ubuntu-latest
 
+    # Opt in to Node.js 24 to silence deprecation warnings
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     # Give the job write permission to push topics.json back to the repo
     permissions:
       contents: write
