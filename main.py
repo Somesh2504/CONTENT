@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -142,25 +143,70 @@ def consume_topic() -> None:
 # ─────────────────────────────────────────────
 
 GEMINI_SYSTEM = """\
-You are a world-class social-media copywriter who creates viral Instagram carousel posts.
-Return ONLY a valid JSON array – no markdown fences, no extra text.
+You are an expert educational carousel designer for Instagram and LinkedIn.
+You must output the exact JSON array format requested, but you may include conversational text BEFORE the JSON array (such as explaining your color theme choice).
 """
 
 GEMINI_USER_TEMPLATE = """\
-Create a 5-slide Instagram carousel about the topic: "{topic}"
+Create a 5-slide carousel about the topic: "{topic}"
+Following every rule below exactly.
 
-Rules:
-- Slide 1 (Hook): MUST NOT contain any technical jargon. Open with a relatable daily-life situation, a shocking statistic, or a curiosity-inducing question that hooks a non-technical person instantly.
-- Slides 2–4: Explain the core concept in simple, engaging language. Use analogies, short sentences, and avoid walls of text.
-- Slide 5: A warm Call-to-Action (CTA) – e.g., "Follow for more", "Save this post", "Share with a friend who needs this".
-- bg_prompt: Each slide needs a unique, dark, cinematic background image description. The scene must be ENTIRELY TEXT-FREE. Describe lighting, mood, objects, and colour palette.
+📐 DIMENSIONS & FORMAT
+- Export as individual slide images (we will handle dimensions in post-processing).
 
-Return STRICTLY this JSON schema – nothing else:
+🎨 DESIGN SYSTEM (apply consistently across all 5 slides)
+Color Palette — pick ONE theme per carousel:
+- Dark Tech: Background #0D0D0D, Accent #FFD700 (gold), Text #FFFFFF, Secondary #A0A0A0
+- Clean Pro: Background #FFFFFF, Accent #4F46E5 (indigo), Text #111827, Secondary #6B7280
+- Bold Brand: Background #1A1A2E, Accent #E94560, Text #FFFFFF, Secondary #AAAAAA
+
+Typography & Consistency:
+- Same background color on all slides
+- Same font family throughout
+- Same accent color for highlights, icons, and numbers
+
+🖼️ SLIDE STRUCTURE — one job per slide
+Slide 1 — HOOK (Stop the Scroll)
+- Huge bold headline that creates curiosity or states a bold claim
+- 1 striking visual or icon that is thematic to the topic
+- Subtext: hint at what they'll learn ("Swipe to learn →")
+
+Slide 2 — CONTEXT / PROBLEM
+- Step label: "Why This Matters" or "The Problem"
+- 2–3 short bullet points (keep it skim-friendly)
+- Supporting diagram or simple illustration
+
+Slide 3 — CORE CONCEPT #1
+- Step label at top: "Concept 1 of 2" or numbered
+- Headline concept name in large bold type
+- Visual: a clean diagram, comparison table, or icon grid
+- 1–2 sentence explanation beneath
+
+Slide 4 — CORE CONCEPT #2 + EXAMPLE
+- Step label: "Concept 2 of 2" or "Real Example"
+- Show a before/after, comparison, or code snippet styled in a dark card
+- Keep text minimal — visuals do the work
+
+Slide 5 — CTA (Call to Action)
+- Closing statement: a bold question or takeaway
+- 1 clear action: "Save this post", "Follow for more", "Comment your question"
+
+🧩 ICONS & VISUAL ELEMENTS
+- Concept icons: use metaphorical icons (e.g., for "Array" → grid of boxes)
+- Diagrams: clean flowcharts, comparison grids, or step ladders
+- Avoid stock photos — prefer abstract visuals, icons, and data-driven graphics
+
+📝 CONTENT RULES
+- Max 30 words of body text per slide — people skim, not read
+- One idea per slide — never cram two concepts together
+
+State which color theme you chose and why it fits the topic before generating.
+Then, return STRICTLY this JSON schema – nothing else after it:
 [
   {{
     "slide_number": 1,
-    "text": "...",
-    "bg_prompt": "..."
+    "text": "Your slide text here (max 30 words)",
+    "bg_prompt": "Description of the background visual/layout to be generated"
   }},
   ...5 objects total...
 ]
@@ -248,15 +294,13 @@ def generate_slides(topic: str) -> list[dict]:
                 response = model.generate_content(prompt)
                 raw_text = response.text.strip()
 
-                # Strip accidental markdown fences
-                if raw_text.startswith("```"):
-                    lines = raw_text.splitlines()
-                    raw_text = "\n".join(
-                        ln for ln in lines
-                        if not ln.strip().startswith("```")
-                    ).strip()
-
-                slides: list[dict] = json.loads(raw_text)
+                # Extract the JSON array from the response, ignoring any conversational text
+                match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
+                if not match:
+                    raise ValueError("Could not find a JSON array in the response")
+                
+                json_str = match.group(0)
+                slides: list[dict] = json.loads(json_str)
 
                 if not isinstance(slides, list) or len(slides) != SLIDE_COUNT:
                     raise ValueError(
