@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 # Configuration
 # ─────────────────────────────────────────────
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL        = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -150,7 +151,7 @@ def generate_slides(topic: str) -> list[dict]:
     """Call Gemini and return the parsed 5-slide list."""
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+        model_name=GEMINI_MODEL,
         system_instruction=GEMINI_SYSTEM,
     )
 

@@ -24,7 +24,7 @@ A fully automated Python pipeline that picks a topic, generates a 5-slide Instag
 ## ⚙️ How It Works
 
 ```
-topics.json ──► Gemini 1.5 Flash ──► 5-slide JSON
+topics.json ──► Gemini (configurable model) ──► 5-slide JSON
                                            │
                               ┌────────────┼────────────┐
                          Slide 1      Slide 2–4      Slide 5
@@ -45,7 +45,7 @@ topics.json ──► Gemini 1.5 Flash ──► 5-slide JSON
 | Step | What happens |
 |------|-------------|
 | **1** | `pick_topic()` — pops the first item from `topics.json` and saves the remainder |
-| **2** | `generate_slides()` — calls Gemini 1.5 Flash, forces JSON output for 5 slides |
+| **2** | `generate_slides()` — calls Gemini (default: `gemini-2.0-flash`), forces JSON output for 5 slides |
 | **3** | `download_image()` — fetches a 1080×1350 cinematic image from Pollinations.ai |
 | **4** | `create_slide_image()` — applies 40% dark overlay + auto-fitting word-wrapped text |
 | **5** | `send_telegram_album()` — uploads all 5 images as a single Telegram media album |
@@ -73,6 +73,7 @@ $env:TELEGRAM_CHAT_ID   = "your_chat_id_here"
 
 # Linux / macOS / GitHub Actions
 export GEMINI_API_KEY="your_key_here"
+export GEMINI_MODEL="gemini-2.0-flash" # optional override
 export TELEGRAM_BOT_TOKEN="your_token_here"
 export TELEGRAM_CHAT_ID="your_chat_id_here"
 ```
@@ -134,6 +135,6 @@ Commit and push — the next scheduled run will pick the first one.
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `google-generativeai` | ≥ 0.7.2 | Gemini 1.5 Flash API |
+| `google-generativeai` | ≥ 0.7.2 | Gemini API client |
 | `Pillow` | ≥ 10.3.0 | Image processing & text overlay |
 | `requests` | ≥ 2.32.0 | HTTP calls (Pollinations + Telegram) |
