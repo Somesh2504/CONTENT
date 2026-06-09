@@ -189,9 +189,11 @@ def generate_slides(topic: str) -> list[dict]:
         except Exception as exc:
             log.warning("Gemini error (attempt %d): %s", attempt, exc)
             if attempt < MAX_RETRIES:
-                # Exponential backoff for API rate limits: e.g. 5s, 15s, 45s...
-                sleep_time = RETRY_DELAY * (3 ** (attempt - 1))
-                log.info("Sleeping for %d seconds before retrying...", sleep_time)
+                # The Free Tier quota is strictly 15 Requests Per Minute.
+                # A 65-second sleep guarantees the 1-minute window completely resets
+                # and safely bypasses the 'retry_delay: 46s' quota errors.
+                sleep_time = 65
+                log.info("Quota limit reached. Sleeping for %d seconds to clear 1-minute window...", sleep_time)
                 time.sleep(sleep_time)
             else:
                 log.error("All Gemini attempts exhausted. Aborting.")
