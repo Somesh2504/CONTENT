@@ -40,16 +40,17 @@ GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# Model fallback chain — each model has its own independent daily quota.
-# If one model's quota is exhausted, we automatically try the next one.
-# Override with GEMINI_MODEL env var to force a single model.
-_FALLBACK_MODELS = [
-    "gemini-2.0-flash-lite",   # Fastest, lightest, separate quota
-    "gemini-2.0-flash",        # Primary model
-    "gemini-1.5-flash-latest", # Legacy fallback
+# Preferred models in priority order.  The script will dynamically
+# discover which models actually exist via genai.list_models() and
+# intersect with this list.  Any model NOT found is silently skipped.
+_PREFERRED_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-preview-05-20",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
 ]
 _env_model = os.getenv("GEMINI_MODEL", "")
-GEMINI_MODELS = [_env_model] if _env_model else _FALLBACK_MODELS
 
 TOPICS_FILE  = Path("topics.json")
 FONT_FILE    = Path("bold_font.ttf")
@@ -106,10 +107,10 @@ def _save_json(path: Path, data: Any) -> None:
 # Step 1 – Topic management
 # ─────────────────────────────────────────────
 
-def pick_topic() -> str:
+def peek_topic() -> str:
     """
-    Load topics.json, pop the first topic, save the remainder,
-    and return the popped topic string.
+    Return the first topic from topics.json WITHOUT removing it.
+    The topic is only consumed (popped) after the full pipeline succeeds.
     """
     if not TOPICS_FILE.exists():
         log.error("topics.json not found. Please create it.")
@@ -121,10 +122,19 @@ def pick_topic() -> str:
         log.error("topics.json is empty – no topics left to process.")
         sys.exit(1)
 
-    topic = topics.pop(0)
+    log.info("Next topic: '%s'  (%d topics total)", topics[0], len(topics))
+    return topics[0]
+
+
+def consume_topic() -> None:
+    """
+    Pop the first topic from topics.json and save.
+    Call this ONLY after the full pipeline has succeeded.
+    """
+    topics: list[str] = _load_json(TOPICS_FILE)
+    removed = topics.pop(0)
     _save_json(TOPICS_FILE, topics)
-    log.info("Picked topic: '%s'  (%d topics remaining)", topic, len(topics))
-    return topic
+    log.info("Consumed topic: '%s'  (%d topics remaining)", removed, len(topics))
 
 
 # ─────────────────────────────────────────────
@@ -157,24 +167,69 @@ Return STRICTLY this JSON schema – nothing else:
 """
 
 
-def _is_quota_or_notfound(exc: Exception) -> bool:
-    """Return True if the exception is a quota/rate-limit or model-not-found error."""
+def _discover_models() -> list[str]:
+    """
+    Query the Gemini API for all models that support 'generateContent'.
+    Returns model short names (e.g. 'gemini-2.5-flash') in preference order.
+    If discovery fails, returns the static preferred list as fallback.
+    """
+    try:
+        available: set[str] = set()
+        for m in genai.list_models():
+            if "generateContent" in (m.supported_generation_methods or []):
+                short = m.name.replace("models/", "")
+                available.add(short)
+
+        log.info("API reports %d models supporting generateContent.", len(available))
+
+        # Return preferred models that actually exist, in preference order
+        ordered = [m for m in _PREFERRED_MODELS if m in available]
+        # Also add any other flash models we didn't list explicitly
+        extras = sorted(m for m in available if m not in ordered and "flash" in m)
+        result = ordered + extras
+
+        if result:
+            log.info("Models to try: %s", result)
+            return result
+
+        log.warning("No preferred models found. Available: %s", available)
+        return list(available)[:5]  # Just try the first 5 available
+
+    except Exception as exc:
+        log.warning("Model discovery failed: %s. Using static list.", exc)
+        return list(_PREFERRED_MODELS)
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """Return True if the exception is a quota/rate-limit error."""
     msg = str(exc).lower()
-    return any(kw in msg for kw in ("429", "resourceexhausted", "quota", "404", "not found", "not_found"))
+    return any(kw in msg for kw in ("429", "resourceexhausted", "quota", "rate"))
 
 
 def generate_slides(topic: str) -> list[dict]:
     """
     Call Gemini and return the parsed 5-slide list.
 
-    Uses a multi-model fallback chain: tries each model in GEMINI_MODELS
-    with MAX_RETRIES per model before moving to the next one.
+    1. Discovers available models via the API (no more 404 guessing)
+    2. Tries each model with MAX_RETRIES
+    3. On quota errors, immediately skips to the next model
     """
     genai.configure(api_key=GEMINI_API_KEY)
     prompt = GEMINI_USER_TEMPLATE.format(topic=topic)
+
+    # If user forced a specific model via env var, use only that
+    if _env_model:
+        models_to_try = [_env_model]
+        log.info("GEMINI_MODEL env override: using only '%s'", _env_model)
+    else:
+        models_to_try = _discover_models()
+
+    if not models_to_try:
+        raise RuntimeError("No Gemini models available. Check your API key.")
+
     last_error: Exception | None = None
 
-    for model_name in GEMINI_MODELS:
+    for model_name in models_to_try:
         log.info("──── Trying model: %s ────", model_name)
 
         try:
@@ -220,9 +275,9 @@ def generate_slides(topic: str) -> list[dict]:
                 last_error = exc
                 log.warning("Gemini [%s] error (attempt %d): %s", model_name, attempt, exc)
 
-                # If quota exhausted or model not found → skip to next model immediately
-                if _is_quota_or_notfound(exc):
-                    log.warning("Quota/model error on '%s' — skipping to next model.", model_name)
+                # If quota exhausted → skip to next model immediately
+                if _is_quota_error(exc):
+                    log.warning("Quota exhausted on '%s' — skipping to next model.", model_name)
                     break  # break inner retry loop, continue to next model
 
                 # For parse errors or transient issues, retry the same model
@@ -231,7 +286,7 @@ def generate_slides(topic: str) -> list[dict]:
                     time.sleep(RETRY_DELAY)
 
     # If we get here, all models and all retries failed
-    log.error("All models and retries exhausted. Tried: %s", GEMINI_MODELS)
+    log.error("All models and retries exhausted. Tried: %s", models_to_try)
     raise RuntimeError(f"Gemini generation failed on all models. Last error: {last_error}")
 
 
@@ -528,8 +583,8 @@ def main() -> None:
     # ── Environment check ───────────────────────────────────────────
     _require_env("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 
-    # ── Step 1: Pick topic ──────────────────────────────────────────
-    topic = pick_topic()
+    # ── Step 1: Peek at topic (don't consume yet) ──────────────────
+    topic = peek_topic()
 
     # ── Step 2: Generate slides via Gemini ─────────────────────────
     slides = generate_slides(topic)
@@ -562,6 +617,9 @@ def main() -> None:
     except Exception as exc:
         log.error("Telegram delivery failed: %s", exc)
         sys.exit(1)
+
+    # ── Step 5: NOW consume the topic (everything succeeded) ───────
+    consume_topic()
 
     log.info("=" * 60)
     log.info("  Pipeline complete for topic: '%s'", topic)
