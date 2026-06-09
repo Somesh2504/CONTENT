@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
+HF_API_KEY          = os.getenv("HF_API_KEY", "")
 
 # Preferred models in priority order.  The script will dynamically
 # discover which models actually exist via genai.list_models() and
@@ -58,17 +59,17 @@ FONT_FILE    = Path("bold_font.ttf")
 OUTPUT_DIR   = Path("output")
 SLIDE_COUNT  = 5
 
-# Pollinations
-POLL_WIDTH   = 1080
-POLL_HEIGHT  = 1350
-POLL_BASE    = "https://image.pollinations.ai/prompt/{prompt}?width={w}&height={h}&nologo=true&seed={seed}"
+# Hugging Face image generation
+HF_API_URL   = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+IMAGE_WIDTH  = 1080
+IMAGE_HEIGHT = 1350
 
 # Overlay opacity  0–255  (102 ≈ 40 %)
 OVERLAY_ALPHA = 102
 
 # Text layout
-CANVAS_W     = POLL_WIDTH
-CANVAS_H     = POLL_HEIGHT
+CANVAS_W     = IMAGE_WIDTH
+CANVAS_H     = IMAGE_HEIGHT
 H_PADDING    = 90          # pixels from each side
 MAX_FONT     = 90          # starting font size
 MIN_FONT     = 32          # minimum acceptable font size
@@ -363,15 +364,15 @@ def _generate_gradient_bg(slide_num: int) -> Image.Image:
     top_r, top_g, top_b = palette[0]
     bot_r, bot_g, bot_b = palette[1]
 
-    img = Image.new("RGBA", (POLL_WIDTH, POLL_HEIGHT))
+    img = Image.new("RGBA", (IMAGE_WIDTH, IMAGE_HEIGHT))
     draw = ImageDraw.Draw(img)
 
-    for y in range(POLL_HEIGHT):
-        ratio = y / POLL_HEIGHT
+    for y in range(IMAGE_HEIGHT):
+        ratio = y / IMAGE_HEIGHT
         r = int(top_r + (bot_r - top_r) * ratio)
         g = int(top_g + (bot_g - top_g) * ratio)
         b = int(top_b + (bot_b - top_b) * ratio)
-        draw.line([(0, y), (POLL_WIDTH, y)], fill=(r, g, b, 255))
+        draw.line([(0, y), (IMAGE_WIDTH, y)], fill=(r, g, b, 255))
 
     log.info("Generated gradient background for slide %d.", slide_num)
     return img
@@ -379,29 +380,36 @@ def _generate_gradient_bg(slide_num: int) -> Image.Image:
 
 def get_background_image(bg_prompt: str, slide_num: int) -> Image.Image:
     """
-    Try to download from Pollinations.ai.  On ANY failure (402, timeout, etc.)
+    Try to generate image via Hugging Face Inference API.  On ANY failure (quota, timeout, etc.)
     fall back to a locally-generated gradient background so the pipeline
     never crashes on image sourcing.
     """
-    # ── Attempt Pollinations ─────────────────────────────────────────────
-    safe_prompt = urllib.parse.quote(bg_prompt, safe="")
-    url = POLL_BASE.format(
-        prompt=safe_prompt,
-        w=POLL_WIDTH,
-        h=POLL_HEIGHT,
-        seed=slide_num * 42,
-    )
+    # ── Attempt Hugging Face ─────────────────────────────────────────────
+    if HF_API_KEY:
+        try:
+            log.info("Generating image for slide %d from Hugging Face…", slide_num)
+            headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+            payload = {
+                "inputs": bg_prompt,
+                "parameters": {"width": 1024, "height": 1024}
+            }
+            resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
+            
+            if resp.status_code == 503:
+                # Model is loading
+                log.warning("Hugging Face model is loading (503). Waiting 15 seconds…")
+                time.sleep(15)
+                resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
 
-    try:
-        log.info("Downloading image for slide %d from Pollinations…", slide_num)
-        resp = requests.get(url, timeout=60)
-        resp.raise_for_status()
-        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-        log.info("Slide %d image downloaded: %dx%d px", slide_num, *img.size)
-        return img
-    except Exception as exc:
-        log.warning("Pollinations failed for slide %d: %s", slide_num, exc)
-        log.info("Falling back to generated gradient background.")
+            resp.raise_for_status()
+            img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+            log.info("Slide %d image downloaded: %dx%d px", slide_num, *img.size)
+            return img
+        except Exception as exc:
+            log.warning("Hugging Face API failed for slide %d: %s", slide_num, exc)
+            log.info("Falling back to generated gradient background.")
+    else:
+        log.warning("HF_API_KEY not found. Skipping Hugging Face.")
 
     # ── Fallback: gradient background ────────────────────────────────────
     return _generate_gradient_bg(slide_num)
@@ -659,7 +667,7 @@ def main() -> None:
     log.info("=" * 60)
 
     # ── Environment check ───────────────────────────────────────────
-    _require_env("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+    _require_env("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "HF_API_KEY")
 
     # ── Step 1: Peek at topic (don't consume yet) ──────────────────
     topic = peek_topic()
