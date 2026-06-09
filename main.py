@@ -291,42 +291,76 @@ def generate_slides(topic: str) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
-# Step 3a – Image download from Pollinations
+# Step 3a – Background image (Pollinations or generated gradient)
 # ─────────────────────────────────────────────
 
-def download_image(bg_prompt: str, slide_num: int) -> Image.Image:
+# Dark cinematic gradient palettes: (top_color, bottom_color)
+_GRADIENT_PALETTES = [
+    ((10, 5, 45),   (60, 15, 90)),     # Deep violet
+    ((5, 15, 45),   (10, 50, 110)),    # Midnight ocean
+    ((35, 8, 12),   (90, 20, 35)),     # Dark crimson
+    ((5, 25, 25),   (12, 70, 55)),     # Emerald night
+    ((35, 20, 5),   (95, 50, 10)),     # Amber dusk
+    ((15, 10, 40),  (50, 30, 80)),     # Royal purple
+    ((5, 10, 30),   (20, 40, 80)),     # Steel blue
+    ((25, 5, 5),    (70, 15, 25)),     # Maroon
+    ((5, 20, 15),   (15, 60, 45)),     # Forest
+    ((30, 15, 40),  (80, 35, 70)),     # Magenta dusk
+]
+
+
+def _generate_gradient_bg(slide_num: int) -> Image.Image:
     """
-    Format the prompt, call Pollinations.ai, and return a PIL Image.
-    Retries up to MAX_RETRIES on failure.
+    Generate a beautiful vertical gradient background using Pillow.
+    Each slide gets a different dark, cinematic colour palette.
+    Zero external dependencies — can never fail.
     """
+    palette = _GRADIENT_PALETTES[(slide_num - 1) % len(_GRADIENT_PALETTES)]
+    top_r, top_g, top_b = palette[0]
+    bot_r, bot_g, bot_b = palette[1]
+
+    img = Image.new("RGBA", (POLL_WIDTH, POLL_HEIGHT))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(POLL_HEIGHT):
+        ratio = y / POLL_HEIGHT
+        r = int(top_r + (bot_r - top_r) * ratio)
+        g = int(top_g + (bot_g - top_g) * ratio)
+        b = int(top_b + (bot_b - top_b) * ratio)
+        draw.line([(0, y), (POLL_WIDTH, y)], fill=(r, g, b, 255))
+
+    log.info("Generated gradient background for slide %d.", slide_num)
+    return img
+
+
+def get_background_image(bg_prompt: str, slide_num: int) -> Image.Image:
+    """
+    Try to download from Pollinations.ai.  On ANY failure (402, timeout, etc.)
+    fall back to a locally-generated gradient background so the pipeline
+    never crashes on image sourcing.
+    """
+    # ── Attempt Pollinations ─────────────────────────────────────────────
     safe_prompt = urllib.parse.quote(bg_prompt, safe="")
     url = POLL_BASE.format(
         prompt=safe_prompt,
         w=POLL_WIDTH,
         h=POLL_HEIGHT,
-        seed=slide_num * 42,   # deterministic seed per slide
+        seed=slide_num * 42,
     )
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            log.info(
-                "Downloading image for slide %d (attempt %d/%d)…",
-                slide_num, attempt, MAX_RETRIES,
-            )
-            resp = requests.get(url, timeout=120)
-            resp.raise_for_status()
+    try:
+        log.info("Downloading image for slide %d from Pollinations…", slide_num)
+        resp = requests.get(url, timeout=60)
+        resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        log.info("Slide %d image downloaded: %dx%d px", slide_num, *img.size)
+        return img
+    except Exception as exc:
+        log.warning("Pollinations failed for slide %d: %s", slide_num, exc)
+        log.info("Falling back to generated gradient background.")
 
-            img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-            log.info("Slide %d image downloaded: %dx%d px", slide_num, *img.size)
-            return img
-
-        except Exception as exc:
-            log.warning("Image download error (attempt %d): %s", attempt, exc)
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAY)
-            else:
-                log.error("Failed to download image for slide %d after %d attempts.", slide_num, MAX_RETRIES)
-                raise
+    # ── Fallback: gradient background ────────────────────────────────────
+    return _generate_gradient_bg(slide_num)
 
 
 # ─────────────────────────────────────────────
@@ -600,7 +634,7 @@ def main() -> None:
         log.info("─── Processing slide %d/%d ───", num, SLIDE_COUNT)
 
         try:
-            raw_img    = download_image(bg_prompt, num)
+            raw_img    = get_background_image(bg_prompt, num)
             final_img  = create_slide_image(raw_img, text, num, SLIDE_COUNT)
             path       = save_slide(final_img, num)
             saved_paths.append(path)
