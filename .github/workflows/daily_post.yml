@@ -36,11 +36,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # fetch-depth 0 ensures git push works correctly with branch history
           fetch-depth: 0
-          # Use a PAT if your repo has branch protection rules that block
-          # the default GITHUB_TOKEN from pushing.  For most public/private
-          # repos the default token is sufficient.
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # ── 2. Python setup ─────────────────────────────────────────────────
@@ -48,13 +44,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: "pip"           # Cache pip packages between runs
+          cache: "pip"
 
       # ── 3. Install dependencies ─────────────────────────────────────────
       - name: Install Python dependencies
         run: pip install --upgrade pip && pip install -r requirements.txt
 
-      # ── 4. Verify topics.json has remaining topics ──────────────────────
+      # ── 4. Install Playwright browser ───────────────────────────────────
+      - name: Install Playwright Chromium
+        run: playwright install --with-deps chromium
+
+      # ── 5. Verify topics.json has remaining topics ──────────────────────
       - name: Check topics list is non-empty
         run: |
           python - <<'EOF'
@@ -67,21 +67,15 @@ jobs:
           print(f"✅  {len(topics)} topic(s) remaining. Next topic: '{topics[0]}'")
           EOF
 
-      # ── 5. Run the main script ──────────────────────────────────────────
+      # ── 6. Run the main script ──────────────────────────────────────────
       - name: Run content generator
         env:
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
-          HF_API_KEY:          ${{ secrets.HF_API_KEY }}
         run: python main.py
 
-      # ── 6. Commit the updated topics.json back to the repo ─────────────
-      #
-      #  CRITICAL: main.py pops the first topic from topics.json.
-      #  We must commit + push that change so the next scheduled run
-      #  doesn't repeat the same topic.
-      #
+      # ── 7. Commit the updated topics.json back to the repo ─────────────
       - name: Commit updated topics.json
         run: |
           git config user.name  "github-actions[bot]"
@@ -89,8 +83,6 @@ jobs:
 
           git add topics.json
 
-          # Only commit if topics.json actually changed.
-          # 'git diff --cached --quiet' exits 0 when there is nothing staged.
           if git diff --cached --quiet; then
             echo "ℹ️  topics.json was not modified — nothing to commit."
           else
@@ -99,12 +91,11 @@ jobs:
             echo "✅  topics.json committed and pushed."
           fi
 
-      # ── 7. Upload generated slides as workflow artifacts ────────────────
-      #  (Optional but useful for debugging without needing Telegram)
+      # ── 8. Upload generated slides as workflow artifacts ────────────────
       - name: Upload slide images
-        if: always()                          # Upload even if Telegram step failed
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: slides-${{ github.run_id }}
-          path: output/slide_*.jpg
-          retention-days: 7                   # Auto-delete after 7 days
+          path: output/slide_*.png
+          retention-days: 7

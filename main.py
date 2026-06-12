@@ -1,9 +1,8 @@
 """
-Zero Human Intervention Daily Content Generator
-================================================
-Picks a topic from topics.json → Generates 5-slide carousel via Gemini AI →
-Downloads images from Pollinations.ai → Overlays text with Pillow →
-Sends carousel to Telegram as a media album.
+Zero Human Intervention Daily Content Generator – Premium Edition
+================================================================
+Picks a topic → Generates structured slide data via Gemini AI →
+Renders premium HTML/CSS slides via Playwright → Sends to Telegram.
 
 Author  : Senior Python Automation Engineer
 Requires: Python 3.10+
@@ -16,13 +15,11 @@ import os
 import re
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any
 
 import google.generativeai as genai
 import requests
-from PIL import Image, ImageDraw, ImageFont
 
 # ─────────────────────────────────────────────
 # Logging
@@ -40,11 +37,9 @@ log = logging.getLogger(__name__)
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
-HF_API_KEY          = os.getenv("HF_API_KEY", "")
+CREATOR_HANDLE      = os.getenv("CREATOR_HANDLE", "@codeinsights")
 
-# Preferred models in priority order.  The script will dynamically
-# discover which models actually exist via genai.list_models() and
-# intersect with this list.  Any model NOT found is silently skipped.
+# Preferred Gemini models in priority order.
 _PREFERRED_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-preview-05-20",
@@ -55,33 +50,15 @@ _PREFERRED_MODELS = [
 _env_model = os.getenv("GEMINI_MODEL", "")
 
 TOPICS_FILE  = Path("topics.json")
-FONT_FILE    = Path("bold_font.ttf")
 OUTPUT_DIR   = Path("output")
 SLIDE_COUNT  = 5
+SLIDE_WIDTH  = 1080
+SLIDE_HEIGHT = 1350
 
-# Hugging Face image generation
-HF_API_URL   = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-IMAGE_WIDTH  = 1080
-IMAGE_HEIGHT = 1350
-
-# Overlay opacity  0–255  (102 ≈ 40 %)
-OVERLAY_ALPHA = 102
-
-# Text layout
-CANVAS_W     = IMAGE_WIDTH
-CANVAS_H     = IMAGE_HEIGHT
-H_PADDING    = 90          # pixels from each side
-MAX_FONT     = 90          # starting font size
-MIN_FONT     = 32          # minimum acceptable font size
-LINE_SPACING = 1.35        # multiplier of font size
-TEXT_COLOR   = (255, 255, 255, 255)
-
-# Telegram
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-
-# Retry settings
 MAX_RETRIES  = 3
-RETRY_DELAY  = 10          # seconds between retries for the same model
+RETRY_DELAY  = 10
+
 
 # ─────────────────────────────────────────────
 # Helper utilities
@@ -145,80 +122,85 @@ def consume_topic() -> None:
 
 GEMINI_SYSTEM = """\
 You are an expert educational carousel designer for Instagram and LinkedIn.
-You must output the exact JSON array format requested, but you may include conversational text BEFORE the JSON array (such as explaining your color theme choice).
+You produce structured JSON for premium, visually stunning carousels.
+You may include brief conversational text BEFORE the JSON output.
 """
 
 GEMINI_USER_TEMPLATE = """\
-Create a 5-slide carousel about the topic: "{topic}"
-Following every rule below exactly.
+Create a premium 5-slide educational carousel about: "{topic}"
 
-📐 DIMENSIONS & FORMAT
-- Export as individual slide images (we will handle dimensions in post-processing).
+DESIGN RULES:
+- Pick the BEST color theme for this topic: "dark_tech", "clean_pro", or "bold_brand"
+  • dark_tech  → Gold accent on black. Best for: coding, tech, AI, data.
+  • clean_pro  → Indigo accent on white. Best for: business, productivity, design.
+  • bold_brand → Red accent on navy. Best for: marketing, motivation, trends.
+- Max 25 words per slide – people SKIM, not read
+- One idea per slide – never cram two concepts
+- Wrap 1-2 KEY words in each headline with **double asterisks** for accent color highlighting
 
-🎨 DESIGN SYSTEM (apply consistently across all 5 slides)
-Color Palette — pick ONE theme per carousel:
-- Dark Tech: Background #0D0D0D, Accent #FFD700 (gold), Text #FFFFFF, Secondary #A0A0A0
-- Clean Pro: Background #FFFFFF, Accent #4F46E5 (indigo), Text #111827, Secondary #6B7280
-- Bold Brand: Background #1A1A2E, Accent #E94560, Text #FFFFFF, Secondary #AAAAAA
+SLIDE STRUCTURE:
+Slide 1 (HOOK – stop the scroll):
+  Big bold claim, shocking stat, or curiosity question. NO jargon. Add a thematic emoji icon.
+Slide 2 (CONTEXT – why this matters):
+  Step label + 3 short bullet points + a one-line practical tip.
+Slide 3 (CONCEPT 1 – core idea):
+  Step label + concept name + 1-2 sentence explanation using a simple analogy.
+Slide 4 (CONCEPT 2 – deeper or example):
+  Step label + second concept or real-world example + brief explanation.
+Slide 5 (CTA – convert attention):
+  Bold question or takeaway + exactly ONE clear action + motivational subtext.
 
-Typography & Consistency:
-- Same background color on all slides
-- Same font family throughout
-- Same accent color for highlights, icons, and numbers
-
-🖼️ SLIDE STRUCTURE — one job per slide
-Slide 1 — HOOK (Stop the Scroll)
-- Huge bold headline that creates curiosity or states a bold claim
-- 1 striking visual or icon that is thematic to the topic
-- Subtext: hint at what they'll learn ("Swipe to learn →")
-
-Slide 2 — CONTEXT / PROBLEM
-- Step label: "Why This Matters" or "The Problem"
-- 2–3 short bullet points (keep it skim-friendly)
-- Supporting diagram or simple illustration
-
-Slide 3 — CORE CONCEPT #1
-- Step label at top: "Concept 1 of 2" or numbered
-- Headline concept name in large bold type
-- Visual: a clean diagram, comparison table, or icon grid
-- 1–2 sentence explanation beneath
-
-Slide 4 — CORE CONCEPT #2 + EXAMPLE
-- Step label: "Concept 2 of 2" or "Real Example"
-- Show a before/after, comparison, or code snippet styled in a dark card
-- Keep text minimal — visuals do the work
-
-Slide 5 — CTA (Call to Action)
-- Closing statement: a bold question or takeaway
-- 1 clear action: "Save this post", "Follow for more", "Comment your question"
-
-🧩 ICONS & VISUAL ELEMENTS
-- Concept icons: use metaphorical icons (e.g., for "Array" → grid of boxes)
-- Diagrams: clean flowcharts, comparison grids, or step ladders
-- Avoid stock photos — prefer abstract visuals, icons, and data-driven graphics
-
-📝 CONTENT RULES
-- Max 30 words of body text per slide — people skim, not read
-- One idea per slide — never cram two concepts together
-
-State which color theme you chose and why it fits the topic before generating.
-Then, return STRICTLY this JSON schema – nothing else after it:
-[
-  {{
-    "slide_number": 1,
-    "text": "Your slide text here (max 30 words)",
-    "bg_prompt": "Description of the background visual/layout to be generated"
-  }},
-  ...5 objects total...
-]
+Return this EXACT JSON schema (nothing else after it):
+{{
+  "color_theme": "dark_tech",
+  "slides": [
+    {{
+      "slide_number": 1,
+      "type": "hook",
+      "icon": "🔌",
+      "headline": "Bold headline with **accent** words",
+      "subtext": "Teaser text. Swipe to learn →"
+    }},
+    {{
+      "slide_number": 2,
+      "type": "context",
+      "step_label": "WHY THIS MATTERS",
+      "headline": "Section **headline**",
+      "bullets": ["Point one", "Point two", "Point three"],
+      "tip": "One-line practical tip"
+    }},
+    {{
+      "slide_number": 3,
+      "type": "concept",
+      "step_label": "CONCEPT 01",
+      "icon": "📡",
+      "headline": "Concept **name**",
+      "body": "1-2 sentence explanation using a simple analogy"
+    }},
+    {{
+      "slide_number": 4,
+      "type": "concept",
+      "step_label": "CONCEPT 02",
+      "icon": "⚡",
+      "headline": "Concept **name**",
+      "body": "1-2 sentence explanation with a real-world example"
+    }},
+    {{
+      "slide_number": 5,
+      "type": "cta",
+      "headline": "Bold **question** or takeaway?",
+      "action": "Save this post",
+      "subtext": "Follow for daily tech insights"
+    }}
+  ]
+}}
 """
 
 
 def _discover_models() -> list[str]:
     """
     Query the Gemini API for all models that support 'generateContent'.
-    Returns model short names (e.g. 'gemini-2.5-flash') in preference order.
-    If discovery fails, returns the static preferred list as fallback.
+    Returns model short names in preference order.
     """
     try:
         available: set[str] = set()
@@ -228,19 +210,14 @@ def _discover_models() -> list[str]:
                 available.add(short)
 
         log.info("API reports %d models supporting generateContent.", len(available))
-
-        # Return preferred models that actually exist, in preference order
         ordered = [m for m in _PREFERRED_MODELS if m in available]
-        # Also add any other flash models we didn't list explicitly
         extras = sorted(m for m in available if m not in ordered and "flash" in m)
         result = ordered + extras
 
         if result:
-            log.info("Models to try: %s", result)
+            log.info("Models to try: %s", result[:5])
             return result
-
-        log.warning("No preferred models found. Available: %s", available)
-        return list(available)[:5]  # Just try the first 5 available
+        return list(available)[:5]
 
     except Exception as exc:
         log.warning("Model discovery failed: %s. Using static list.", exc)
@@ -253,18 +230,43 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(kw in msg for kw in ("429", "resourceexhausted", "quota", "rate"))
 
 
-def generate_slides(topic: str) -> list[dict]:
+def _extract_json(raw_text: str) -> dict:
     """
-    Call Gemini and return the parsed 5-slide list.
+    Extract JSON object or array from Gemini response text.
+    Handles markdown fences and conversational text before/after JSON.
+    """
+    # Strip markdown fences
+    cleaned = raw_text.strip()
+    if "```" in cleaned:
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(
+            ln for ln in lines if not ln.strip().startswith("```")
+        ).strip()
 
-    1. Discovers available models via the API (no more 404 guessing)
-    2. Tries each model with MAX_RETRIES
-    3. On quota errors, immediately skips to the next model
+    # Use raw_decode to find JSON in the text
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(cleaned):
+        if ch in ('{', '['):
+            try:
+                parsed, _ = decoder.raw_decode(cleaned, i)
+                if isinstance(parsed, dict) and "slides" in parsed:
+                    return parsed
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    return {"color_theme": "dark_tech", "slides": parsed}
+            except json.JSONDecodeError:
+                continue
+
+    raise ValueError("Could not find valid JSON in Gemini response")
+
+
+def generate_slides(topic: str) -> dict:
+    """
+    Call Gemini and return the parsed slide data as a dict with
+    'color_theme' and 'slides' keys.
     """
     genai.configure(api_key=GEMINI_API_KEY)
     prompt = GEMINI_USER_TEMPLATE.format(topic=topic)
 
-    # If user forced a specific model via env var, use only that
     if _env_model:
         models_to_try = [_env_model]
         log.info("GEMINI_MODEL env override: using only '%s'", _env_model)
@@ -295,293 +297,513 @@ def generate_slides(topic: str) -> list[dict]:
                 response = model.generate_content(prompt)
                 raw_text = response.text.strip()
 
-                # Extract the JSON array from the response, ignoring any conversational text
-                match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
-                if not match:
-                    raise ValueError("Could not find a JSON array in the response")
-                
-                json_str = match.group(0)
-                slides: list[dict] = json.loads(json_str)
+                slides_data = _extract_json(raw_text)
+                slides = slides_data.get("slides", [])
 
                 if not isinstance(slides, list) or len(slides) != SLIDE_COUNT:
                     raise ValueError(
-                        f"Expected {SLIDE_COUNT} slides, got {len(slides) if isinstance(slides, list) else type(slides)}"
+                        f"Expected {SLIDE_COUNT} slides, got "
+                        f"{len(slides) if isinstance(slides, list) else type(slides)}"
                     )
 
                 # Validate required keys
                 for s in slides:
-                    if "slide_number" not in s or "text" not in s or "bg_prompt" not in s:
+                    if "slide_number" not in s or "headline" not in s:
                         raise ValueError(f"Slide missing required keys: {s}")
 
                 log.info("✅ Gemini [%s] returned %d valid slides.", model_name, len(slides))
-                return slides
+                return slides_data
 
             except Exception as exc:
                 last_error = exc
                 log.warning("Gemini [%s] error (attempt %d): %s", model_name, attempt, exc)
 
-                # If quota exhausted → skip to next model immediately
                 if _is_quota_error(exc):
-                    log.warning("Quota exhausted on '%s' — skipping to next model.", model_name)
-                    break  # break inner retry loop, continue to next model
+                    log.warning("Quota exhausted on '%s' — skipping.", model_name)
+                    break
 
-                # For parse errors or transient issues, retry the same model
                 if attempt < MAX_RETRIES:
                     log.info("Sleeping %d seconds before retry…", RETRY_DELAY)
                     time.sleep(RETRY_DELAY)
 
-    # If we get here, all models and all retries failed
-    log.error("All models and retries exhausted. Tried: %s", models_to_try)
-    raise RuntimeError(f"Gemini generation failed on all models. Last error: {last_error}")
+    log.error("All models exhausted. Tried: %s", models_to_try)
+    raise RuntimeError(f"Gemini generation failed. Last error: {last_error}")
 
 
 # ─────────────────────────────────────────────
-# Step 3a – Background image (Pollinations or generated gradient)
+# Step 3 – Premium HTML/CSS slide rendering
 # ─────────────────────────────────────────────
 
-# Dark cinematic gradient palettes: (top_color, bottom_color)
-_GRADIENT_PALETTES = [
-    ((10, 5, 45),   (60, 15, 90)),     # Deep violet
-    ((5, 15, 45),   (10, 50, 110)),    # Midnight ocean
-    ((35, 8, 12),   (90, 20, 35)),     # Dark crimson
-    ((5, 25, 25),   (12, 70, 55)),     # Emerald night
-    ((35, 20, 5),   (95, 50, 10)),     # Amber dusk
-    ((15, 10, 40),  (50, 30, 80)),     # Royal purple
-    ((5, 10, 30),   (20, 40, 80)),     # Steel blue
-    ((25, 5, 5),    (70, 15, 25)),     # Maroon
-    ((5, 20, 15),   (15, 60, 45)),     # Forest
-    ((30, 15, 40),  (80, 35, 70)),     # Magenta dusk
-]
+def _safe_text(text: str) -> str:
+    """Escape HTML chars, then convert **word** to accent-highlighted spans."""
+    safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    safe = re.sub(r'\*\*(.+?)\*\*', r'<span class="accent">\1</span>', safe)
+    return safe
 
 
-def _generate_gradient_bg(slide_num: int) -> Image.Image:
-    """
-    Generate a beautiful vertical gradient background using Pillow.
-    Each slide gets a different dark, cinematic colour palette.
-    Zero external dependencies — can never fail.
-    """
-    palette = _GRADIENT_PALETTES[(slide_num - 1) % len(_GRADIENT_PALETTES)]
-    top_r, top_g, top_b = palette[0]
-    bot_r, bot_g, bot_b = palette[1]
+# ── The complete CSS design system ───────────────────────────────────────────
+_SLIDE_CSS = """\
+* { margin: 0; padding: 0; box-sizing: border-box; }
 
-    img = Image.new("RGBA", (IMAGE_WIDTH, IMAGE_HEIGHT))
-    draw = ImageDraw.Draw(img)
+body {
+  margin: 0;
+  padding: 0;
+  width: 1080px;
+  height: 1350px;
+  overflow: hidden;
+}
 
-    for y in range(IMAGE_HEIGHT):
-        ratio = y / IMAGE_HEIGHT
-        r = int(top_r + (bot_r - top_r) * ratio)
-        g = int(top_g + (bot_g - top_g) * ratio)
-        b = int(top_b + (bot_b - top_b) * ratio)
-        draw.line([(0, y), (IMAGE_WIDTH, y)], fill=(r, g, b, 255))
+.slide {
+  width: 1080px;
+  height: 1350px;
+  position: relative;
+  overflow: hidden;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
 
-    log.info("Generated gradient background for slide %d.", slide_num)
-    return img
+/* ── Themes ──────────────────────────────── */
+.dark-tech {
+  --bg: #0D0D0D;
+  --bg-end: #141428;
+  --accent: #FFD700;
+  --accent-soft: rgba(255, 215, 0, 0.07);
+  --accent-glow: rgba(255, 215, 0, 0.12);
+  --text: #FFFFFF;
+  --secondary: #B0B0B0;
+  --card-bg: rgba(255,255,255,0.04);
+  --card-border: rgba(255,255,255,0.08);
+}
+
+.clean-pro {
+  --bg: #F7F8FA;
+  --bg-end: #E4E8EF;
+  --accent: #4F46E5;
+  --accent-soft: rgba(79, 70, 229, 0.06);
+  --accent-glow: rgba(79, 70, 229, 0.10);
+  --text: #111827;
+  --secondary: #6B7280;
+  --card-bg: rgba(0,0,0,0.03);
+  --card-border: rgba(0,0,0,0.06);
+}
+
+.bold-brand {
+  --bg: #1A1A2E;
+  --bg-end: #16213E;
+  --accent: #E94560;
+  --accent-soft: rgba(233, 69, 96, 0.07);
+  --accent-glow: rgba(233, 69, 96, 0.12);
+  --text: #FFFFFF;
+  --secondary: #B0B0B8;
+  --card-bg: rgba(255,255,255,0.04);
+  --card-border: rgba(255,255,255,0.08);
+}
+
+/* ── Background gradient ──────────────────── */
+.slide::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(170deg, var(--bg) 0%, var(--bg-end) 100%);
+  z-index: 0;
+}
+
+/* ── Subtle dot pattern ───────────────────── */
+.bg-pattern {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, var(--accent) 0.5px, transparent 0.5px);
+  background-size: 30px 30px;
+  opacity: 0.03;
+  z-index: 1;
+}
+
+/* ── Top accent bar ───────────────────────── */
+.top-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, transparent 10%, var(--accent) 50%, transparent 90%);
+  z-index: 3;
+}
+
+/* ── Decorative corners ───────────────────── */
+.decor-tl, .decor-br {
+  position: absolute;
+  width: 30px;
+  height: 30px;
+  z-index: 2;
+  opacity: 0.4;
+}
+.decor-tl {
+  top: 55px;
+  left: 50px;
+  border-top: 2.5px solid var(--accent);
+  border-left: 2.5px solid var(--accent);
+}
+.decor-br {
+  bottom: 85px;
+  right: 50px;
+  border-bottom: 2.5px solid var(--accent);
+  border-right: 2.5px solid var(--accent);
+}
+
+/* ── Glow circles ─────────────────────────── */
+.glow-tl {
+  position: absolute;
+  width: 350px;
+  height: 350px;
+  border-radius: 50%;
+  background: var(--accent-glow);
+  filter: blur(100px);
+  top: -120px;
+  left: -120px;
+  z-index: 1;
+}
+.glow-br {
+  position: absolute;
+  width: 280px;
+  height: 280px;
+  border-radius: 50%;
+  background: var(--accent-glow);
+  filter: blur(90px);
+  bottom: -80px;
+  right: -80px;
+  z-index: 1;
+}
+
+/* ── Content safe zone ────────────────────── */
+.content {
+  position: relative;
+  z-index: 2;
+  padding: 110px 65px 100px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Typography ───────────────────────────── */
+.headline {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -1.5px;
+  margin-bottom: 20px;
+}
+.headline .accent { color: var(--accent); }
+
+.headline-xl { font-size: 68px; }
+.headline-lg { font-size: 54px; }
+
+.subtext {
+  font-size: 26px;
+  line-height: 1.5;
+  color: var(--secondary);
+  font-weight: 400;
+}
+
+.body-text {
+  font-size: 26px;
+  line-height: 1.65;
+  color: var(--secondary);
+  font-weight: 400;
+}
+
+/* ── Step label ───────────────────────────── */
+.step-label {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 18px;
+  margin-bottom: 30px;
+  width: fit-content;
+}
+
+/* ── Icon ──────────────────────────────────── */
+.icon-display {
+  font-size: 64px;
+  margin-bottom: 20px;
+  line-height: 1;
+}
+
+/* ── Accent line divider ──────────────────── */
+.accent-line {
+  width: 55px;
+  height: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  margin-bottom: 24px;
+}
+
+/* ── Bullet list ──────────────────────────── */
+.bullets {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0;
+}
+.bullets li {
+  font-size: 27px;
+  line-height: 1.5;
+  padding: 14px 0 14px 38px;
+  position: relative;
+  color: var(--text);
+  font-weight: 400;
+}
+.bullets li::before {
+  content: '▸';
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+/* ── Tip callout box ──────────────────────── */
+.tip-box {
+  background: var(--accent-soft);
+  border-left: 4px solid var(--accent);
+  border-radius: 0 12px 12px 0;
+  padding: 20px 24px;
+  margin-top: auto;
+}
+.tip-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.tip-text {
+  font-size: 22px;
+  line-height: 1.5;
+  color: var(--secondary);
+}
+
+/* ── CTA badge button ─────────────────────── */
+.cta-badge {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 22px;
+  padding: 18px 44px;
+  border-radius: 50px;
+  margin-top: 28px;
+  letter-spacing: 0.5px;
+  width: fit-content;
+}
+
+/* ── Footer ───────────────────────────────── */
+.footer {
+  position: absolute;
+  bottom: 36px;
+  left: 65px;
+  right: 65px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 17px;
+  color: var(--secondary);
+  z-index: 2;
+  font-weight: 500;
+}
+.footer .page-num {
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--accent);
+}
+
+/* ── Spacer ────────────────────────────────── */
+.spacer { flex: 1; }
+
+/* ── Swipe indicator ──────────────────────── */
+.swipe-arrow {
+  display: inline-block;
+  font-size: 20px;
+  color: var(--accent);
+  font-weight: 600;
+  margin-top: 16px;
+  letter-spacing: 1px;
+}
+"""
 
 
-def get_background_image(bg_prompt: str, slide_num: int) -> Image.Image:
-    """
-    Try to generate image via Hugging Face Inference API.  On ANY failure (quota, timeout, etc.)
-    fall back to a locally-generated gradient background so the pipeline
-    never crashes on image sourcing.
-    """
-    # ── Attempt Hugging Face ─────────────────────────────────────────────
-    if HF_API_KEY:
-        try:
-            log.info("Generating image for slide %d from Hugging Face…", slide_num)
-            headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-            payload = {
-                "inputs": bg_prompt,
-                "parameters": {"width": 1024, "height": 1024}
-            }
-            resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
-            
-            if resp.status_code == 503:
-                # Model is loading
-                log.warning("Hugging Face model is loading (503). Waiting 15 seconds…")
-                time.sleep(15)
-                resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
-
-            resp.raise_for_status()
-            img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-            log.info("Slide %d image downloaded: %dx%d px", slide_num, *img.size)
-            return img
-        except Exception as exc:
-            log.warning("Hugging Face API failed for slide %d: %s", slide_num, exc)
-            log.info("Falling back to generated gradient background.")
-    else:
-        log.warning("HF_API_KEY not found. Skipping Hugging Face.")
-
-    # ── Fallback: gradient background ────────────────────────────────────
-    return _generate_gradient_bg(slide_num)
+def _build_hook_html(slide: dict) -> str:
+    """Slide 1: Big bold hook with icon."""
+    icon = slide.get("icon", "🚀")
+    headline = _safe_text(slide.get("headline", ""))
+    subtext = _safe_text(slide.get("subtext", ""))
+    return f'''
+    <div class="spacer"></div>
+    <div class="icon-display">{icon}</div>
+    <h1 class="headline headline-xl">{headline}</h1>
+    <div class="accent-line"></div>
+    <p class="subtext">{subtext}</p>
+    <div class="spacer"></div>
+    '''
 
 
-# ─────────────────────────────────────────────
-# Step 3b – Pillow text overlay
-# ─────────────────────────────────────────────
+def _build_context_html(slide: dict) -> str:
+    """Slide 2: Context with bullets and tip."""
+    label = _safe_text(slide.get("step_label", "WHY THIS MATTERS"))
+    headline = _safe_text(slide.get("headline", ""))
+    bullets = slide.get("bullets", [])
+    tip = slide.get("tip", "")
 
-def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Load TTF font at given size, fall back to default if not found."""
-    if FONT_FILE.exists():
-        return ImageFont.truetype(str(FONT_FILE), size)
-    log.warning("'%s' not found – using Pillow default font.", FONT_FILE)
-    return ImageFont.load_default()
+    bullets_html = "".join(f"<li>{_safe_text(b)}</li>" for b in bullets)
 
+    tip_html = ""
+    if tip:
+        tip_html = f'''
+        <div class="tip-box">
+          <div class="tip-label">💡 PRO TIP</div>
+          <div class="tip-text">{_safe_text(tip)}</div>
+        </div>'''
 
-def _wrap_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    max_width: int,
-) -> list[str]:
-    """
-    Word-wrap `text` so each line fits within `max_width` pixels.
-    Returns list of wrapped lines.
-    """
-    words = text.split()
-    lines: list[str] = []
-    current = ""
-
-    for word in words:
-        candidate = (current + " " + word).strip()
-        bbox = draw.textbbox((0, 0), candidate, font=font)
-        if bbox[2] <= max_width:
-            current = candidate
-        else:
-            if current:
-                lines.append(current)
-            current = word
-
-    if current:
-        lines.append(current)
-
-    return lines
+    return f'''
+    <div class="step-label">{label}</div>
+    <h1 class="headline headline-lg">{headline}</h1>
+    <div class="accent-line"></div>
+    <ul class="bullets">{bullets_html}</ul>
+    {tip_html}
+    '''
 
 
-def _fit_font_and_wrap(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    max_width: int,
-    max_height: int,
-) -> tuple[ImageFont.FreeTypeFont, list[str]]:
-    """
-    Binary-search for the largest font size where the wrapped text
-    still fits inside (max_width × max_height).
-    """
-    lo, hi = MIN_FONT, MAX_FONT
+def _build_concept_html(slide: dict) -> str:
+    """Slide 3 or 4: Core concept explanation."""
+    label = _safe_text(slide.get("step_label", "CONCEPT"))
+    icon = slide.get("icon", "💡")
+    headline = _safe_text(slide.get("headline", ""))
+    body = _safe_text(slide.get("body", ""))
 
-    best_font  = _load_font(lo)
-    best_lines = _wrap_text(draw, text, best_font, max_width)
-
-    for size in range(hi, lo - 1, -2):          # step down by 2 for speed
-        font  = _load_font(size)
-        lines = _wrap_text(draw, text, font, max_width)
-        line_h = size * LINE_SPACING
-        total_h = len(lines) * line_h
-
-        if total_h <= max_height:
-            best_font  = font
-            best_lines = lines
-            break
-
-    return best_font, best_lines
+    return f'''
+    <div class="step-label">{label}</div>
+    <div class="spacer"></div>
+    <div class="icon-display">{icon}</div>
+    <h1 class="headline headline-lg">{headline}</h1>
+    <div class="accent-line"></div>
+    <p class="body-text">{body}</p>
+    <div class="spacer"></div>
+    '''
 
 
-def _add_dark_overlay(img: Image.Image) -> Image.Image:
-    """Blend a semi-transparent black rectangle over the full image."""
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, OVERLAY_ALPHA))
-    return Image.alpha_composite(img, overlay)
+def _build_cta_html(slide: dict) -> str:
+    """Slide 5: Call to action."""
+    headline = _safe_text(slide.get("headline", ""))
+    action = _safe_text(slide.get("action", "Save this post"))
+    subtext = _safe_text(slide.get("subtext", ""))
+
+    return f'''
+    <div class="spacer"></div>
+    <h1 class="headline headline-xl">{headline}</h1>
+    <div class="accent-line"></div>
+    <p class="subtext">{subtext}</p>
+    <div class="cta-badge">{action}</div>
+    <div class="spacer"></div>
+    '''
 
 
-def _draw_slide_number(
-    draw: ImageDraw.ImageDraw,
-    num: int,
+_CONTENT_BUILDERS = {
+    "hook":    _build_hook_html,
+    "context": _build_context_html,
+    "concept": _build_concept_html,
+    "cta":     _build_cta_html,
+}
+
+
+def _build_full_slide_html(
+    slide: dict,
+    color_theme: str,
+    handle: str,
     total: int,
-    canvas_w: int,
-    canvas_h: int,
-) -> None:
-    """Small pill indicator at the bottom, e.g.  • • ● • •"""
-    indicator_font = _load_font(28)
-    dots = "  ".join("●" if i + 1 == num else "○" for i in range(total))
-    bbox = draw.textbbox((0, 0), dots, font=indicator_font)
-    x = (canvas_w - (bbox[2] - bbox[0])) // 2
-    y = canvas_h - 80
-    draw.text((x, y), dots, font=indicator_font, fill=(255, 255, 255, 180))
+) -> str:
+    """Build complete, self-contained HTML for a single slide."""
+    theme_class = color_theme.replace("_", "-")
+    slide_num = slide["slide_number"]
+    slide_type = slide.get("type", "concept")
+
+    builder = _CONTENT_BUILDERS.get(slide_type, _build_concept_html)
+    content_html = builder(slide)
+
+    return f'''<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+{_SLIDE_CSS}
+</style>
+</head>
+<body>
+<div class="slide {theme_class}">
+  <div class="bg-pattern"></div>
+  <div class="top-bar"></div>
+  <div class="decor-tl"></div>
+  <div class="decor-br"></div>
+  <div class="glow-tl"></div>
+  <div class="glow-br"></div>
+  <div class="content">
+    {content_html}
+  </div>
+  <div class="footer">
+    <span class="handle">{handle}</span>
+    <span class="page-num">{slide_num}/{total}</span>
+  </div>
+</div>
+</body>
+</html>'''
 
 
-def create_slide_image(
-    base_img: Image.Image,
-    text: str,
-    slide_num: int,
-    total_slides: int,
-) -> Image.Image:
+def render_all_slides(slides_data: dict) -> list[Path]:
     """
-    Composite the full slide:
-      1. Resize/crop source image to CANVAS_W × CANVAS_H
-      2. Apply dark overlay
-      3. Render word-wrapped, vertically centred text
-      4. Add slide-number dots
-    Returns the finished RGBA image.
+    Render each slide as a high-quality PNG using Playwright.
+    Opens one browser, renders all slides, then closes.
     """
-    # ── Resize keeping aspect ratio, then centre-crop ──────────────────────
-    src = base_img.copy()
-    src_ratio = src.width / src.height
-    tgt_ratio = CANVAS_W / CANVAS_H
+    from playwright.sync_api import sync_playwright
 
-    if src_ratio > tgt_ratio:
-        new_h = CANVAS_H
-        new_w = int(new_h * src_ratio)
-    else:
-        new_w = CANVAS_W
-        new_h = int(new_w / src_ratio)
-
-    src = src.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - CANVAS_W) // 2
-    top  = (new_h - CANVAS_H) // 2
-    src  = src.crop((left, top, left + CANVAS_W, top + CANVAS_H))
-
-    # ── Dark overlay ────────────────────────────────────────────────────────
-    canvas = _add_dark_overlay(src)
-
-    # ── Text rendering ──────────────────────────────────────────────────────
-    draw       = ImageDraw.Draw(canvas)
-    usable_w   = CANVAS_W - 2 * H_PADDING
-    usable_h   = CANVAS_H - 200          # reserve space for dots + margins
-
-    font, lines = _fit_font_and_wrap(draw, text, usable_w, usable_h)
-    line_h      = int(font.size * LINE_SPACING)
-    block_h     = len(lines) * line_h
-
-    # Vertically centre the text block
-    y_start = (CANVAS_H - block_h) // 2
-
-    for i, line in enumerate(lines):
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = bbox[2] - bbox[0]
-        x = (CANVAS_W - line_w) // 2          # horizontally centred
-
-        # Subtle drop shadow for legibility
-        draw.text((x + 3, y_start + i * line_h + 3), line,
-                  font=font, fill=(0, 0, 0, 160))
-        draw.text((x, y_start + i * line_h), line,
-                  font=font, fill=TEXT_COLOR)
-
-    # ── Slide-number dots ───────────────────────────────────────────────────
-    _draw_slide_number(draw, slide_num, total_slides, CANVAS_W, CANVAS_H)
-
-    return canvas
-
-
-# ─────────────────────────────────────────────
-# Step 3c – Save slides locally
-# ─────────────────────────────────────────────
-
-def save_slide(img: Image.Image, slide_num: int) -> Path:
-    """Convert RGBA → RGB and save as JPEG. Returns the file path."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = OUTPUT_DIR / f"slide_{slide_num}.jpg"
-    img.convert("RGB").save(str(path), "JPEG", quality=95)
-    log.info("Saved: %s", path)
-    return path
+
+    color_theme = slides_data.get("color_theme", "dark_tech")
+    slides = slides_data["slides"]
+    total = len(slides)
+
+    paths: list[Path] = []
+
+    log.info("Launching Playwright (Chromium) for slide rendering…")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": SLIDE_WIDTH, "height": SLIDE_HEIGHT},
+        )
+
+        for slide in slides:
+            num = slide["slide_number"]
+            html = _build_full_slide_html(slide, color_theme, CREATOR_HANDLE, total)
+
+            # Load HTML and wait for Google Fonts to finish loading
+            page.set_content(html, wait_until="networkidle")
+            page.wait_for_timeout(500)  # Extra buffer for font rendering
+
+            path = OUTPUT_DIR / f"slide_{num}.png"
+            page.screenshot(path=str(path))
+            paths.append(path)
+            log.info("✅ Rendered slide %d/%d → %s", num, total, path.name)
+
+        browser.close()
+
+    log.info("All %d slides rendered successfully.", len(paths))
+    return paths
 
 
 # ─────────────────────────────────────────────
@@ -619,7 +841,8 @@ def send_telegram_album(image_paths: list[Path], topic: str) -> None:
         for i, path in enumerate(image_paths):
             fh = open(path, "rb")   # noqa: WPS515
             opened.append(fh)
-            files[f"slide_{i + 1}"] = (path.name, fh, "image/jpeg")
+            mime = "image/png" if path.suffix == ".png" else "image/jpeg"
+            files[f"slide_{i + 1}"] = (path.name, fh, mime)
 
         data = {
             "chat_id": TELEGRAM_CHAT_ID,
@@ -663,41 +886,27 @@ def send_telegram_album(image_paths: list[Path], topic: str) -> None:
 
 def main() -> None:
     log.info("=" * 60)
-    log.info("  Zero-Human-Intervention Content Generator – START")
+    log.info("  Premium Content Generator – START")
     log.info("=" * 60)
 
     # ── Environment check ───────────────────────────────────────────
-    _require_env("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "HF_API_KEY")
+    _require_env("GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 
     # ── Step 1: Peek at topic (don't consume yet) ──────────────────
     topic = peek_topic()
 
-    # ── Step 2: Generate slides via Gemini ─────────────────────────
-    slides = generate_slides(topic)
+    # ── Step 2: Generate structured slide data via Gemini ──────────
+    slides_data = generate_slides(topic)
+    log.info("Theme chosen: %s", slides_data.get("color_theme", "unknown"))
 
-    # ── Step 3: Download → overlay → save each slide ───────────────
-    saved_paths: list[Path] = []
+    # ── Step 3: Render premium HTML/CSS slides via Playwright ──────
+    try:
+        saved_paths = render_all_slides(slides_data)
+    except Exception as exc:
+        log.error("Slide rendering failed: %s", exc)
+        sys.exit(1)
 
-    for slide in slides:
-        num       = slide["slide_number"]
-        text      = slide["text"]
-        bg_prompt = slide["bg_prompt"]
-
-        log.info("─── Processing slide %d/%d ───", num, SLIDE_COUNT)
-
-        try:
-            raw_img    = get_background_image(bg_prompt, num)
-            final_img  = create_slide_image(raw_img, text, num, SLIDE_COUNT)
-            path       = save_slide(final_img, num)
-            saved_paths.append(path)
-        except Exception as exc:
-            log.error("Fatal error on slide %d: %s", num, exc)
-            # Clean up any already-saved outputs so next run is clean
-            for p in saved_paths:
-                p.unlink(missing_ok=True)
-            sys.exit(1)
-
-    # ── Step 4: Send to Telegram ────────────────────────────────────
+    # ── Step 4: Send to Telegram ───────────────────────────────────
     try:
         send_telegram_album(saved_paths, topic)
     except Exception as exc:
